@@ -2,6 +2,7 @@ package com.james.batchsave.controller;
 
 import com.google.common.collect.Lists;
 import com.james.batchsave.dataobject.Batch;
+import com.james.batchsave.mapper.BatchMapper;
 import com.james.batchsave.service.IBatchService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -12,9 +13,9 @@ import org.springframework.web.bind.annotation.RequestMethod;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.Map;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 @Controller
 @Slf4j
@@ -22,6 +23,9 @@ public class BatchController {
 
     @Autowired
     private IBatchService service;
+
+    @Autowired
+    private BatchMapper mapper;
 
     @RequestMapping(method = RequestMethod.GET, path = "/hello")
     public String hello() {
@@ -55,20 +59,35 @@ public class BatchController {
         List<Batch> batchList = new ArrayList<>();
         long startTime = System.currentTimeMillis();
 
-        for (int i = 0; i < 5000; i++) {
+        for (int i = 0; i < 500; i++) {
             Batch target = new Batch();
             BeanUtils.copyProperties(batch, target);
             target.setK1(String.valueOf(1));
             target.setK2(String.valueOf(2));
             target.setK3(String.valueOf(3));
             target.setK4(String.valueOf(4));
+            target.setId(String.valueOf(i + 1));
             batchList.add(target);
         }
 
         List<List<Batch>> partitions = Lists.partition(batchList, 100);
-        for (List<Batch> partition : partitions) {
-            service.batchUpdate(partition);
-        }
+
+        List<CompletableFuture<List<Batch>>> futures = partitions
+                .stream()
+                .map(partition -> CompletableFuture.supplyAsync(() -> {
+                    List<Batch> partitionResult = new ArrayList<>();
+                    partition.forEach(e -> partitionResult.add(mapper.selectById(e.getId())));
+                    return partitionResult;}))
+                .collect(Collectors.toList());
+
+        List<Batch> allResult = CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenApply(v -> {
+                    List<Batch> result = new ArrayList<>();
+                    futures.stream().map(future -> getFutureResult(future, new ArrayList<Batch>())).forEach(result::addAll);
+                    return result;
+                })
+                .join();
+
         /*ExecutorService executorService = Executors.newFixedThreadPool(partitions.size());
         CompletableFuture[] completableFutures = partitions.stream().map(e ->
                 CompletableFuture.runAsync(() -> service.batchUpdate(e), executorService)
@@ -78,5 +97,13 @@ public class BatchController {
         // TODO 多线程更新
         log.info(">> costTime: {}ms", System.currentTimeMillis() - startTime);
         return "ok";
+    }
+
+    public static <T> T getFutureResult(Future<T> future, T defaultValue) {
+        try {
+            return future.get();
+        } catch (Exception ignored) {
+            return defaultValue;
+        }
     }
 }
